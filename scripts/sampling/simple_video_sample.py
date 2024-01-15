@@ -28,7 +28,7 @@ def sample(
     motion_bucket_id: int = 127,
     cond_aug: float = 0.02,
     seed: int = 23,
-    decoding_t: int = 14,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
+    decoding_t: int = 4,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
     device: str = "cuda",
     output_folder: Optional[str] = None,
 ):
@@ -91,7 +91,7 @@ def sample(
             raise ValueError("Folder does not contain any images.")
     else:
         raise ValueError
-
+    # process images by images
     for input_img_path in all_img_paths:
         with Image.open(input_img_path) as image:
             if image.mode == "RGBA":
@@ -108,21 +108,23 @@ def sample(
             image = ToTensor()(image)
             image = image * 2.0 - 1.0
 
-        image = image.unsqueeze(0).to(device)
+        image = image.unsqueeze(0).to(device) # 1 x C x H x W
         H, W = image.shape[2:]
         assert image.shape[1] == 3
-        F = 8
+        F = 8 # downsample factor
         C = 4
-        shape = (num_frames, C, H // F, W // F)
+        shape = (num_frames, C, H // F, W // F)  # 14(SVD) x 4 x 576 / 8 x 1024 / 8
         if (H, W) != (576, 1024):
             print(
                 "WARNING: The conditioning frame you provided is not 576x1024. This leads to suboptimal performance as model was only trained on 576x1024. Consider increasing `cond_aug`."
             )
-        if motion_bucket_id > 255:
+            
+        # motion_bucket_id: ??? 127
+        if motion_bucket_id > 255: 
             print(
                 "WARNING: High motion bucket! This may lead to suboptimal performance."
             )
-
+        # fps_id: ??? temporal index?
         if fps_id < 5:
             print("WARNING: Small fps value! This may lead to suboptimal performance.")
 
@@ -132,20 +134,25 @@ def sample(
         value_dict = {}
         value_dict["motion_bucket_id"] = motion_bucket_id
         value_dict["fps_id"] = fps_id
-        value_dict["cond_aug"] = cond_aug
+        value_dict["cond_aug"] = cond_aug # float: 0.02
         value_dict["cond_frames_without_noise"] = image
-        value_dict["cond_frames"] = image + cond_aug * torch.randn_like(image)
-        value_dict["cond_aug"] = cond_aug
+        value_dict["cond_frames"] = image + cond_aug * torch.randn_like(image) # noisy image
+        # value_dict["cond_aug"] = cond_aug # why do it again here?
 
         with torch.no_grad():
-            with torch.autocast(device):
+            with torch.autocast(device, dtype=torch.bfloat16):
+            # the following opts are not implemented in bf16:
+            # 1. upsample_bicubic2d_out_frame
+            # with torch.autocast(device):
                 batch, batch_uc = get_batch(
-                    get_unique_embedder_keys_from_conditioner(model.conditioner),
+                    get_unique_embedder_keys_from_conditioner(model.conditioner), # check what conditions do the model need
                     value_dict,
-                    [1, num_frames],
+                    [1, num_frames], # duplicate everything in this shape, batch_uc is cloned from batch
                     T=num_frames,
                     device=device,
-                )
+                ) 
+                # model type: DiffusionEngine: sgm/models/diffusion.py
+                # model conditioner: sgm.modules.GeneralConditioner sgm/modules/encoders/modules.py
                 c, uc = model.conditioner.get_unconditional_conditioning(
                     batch,
                     batch_uc=batch_uc,
@@ -155,28 +162,28 @@ def sample(
                     ],
                 )
 
-                for k in ["crossattn", "concat"]:
-                    uc[k] = repeat(uc[k], "b ... -> b t ...", t=num_frames)
-                    uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=num_frames)
+                for k in ["crossattn", "concat"]: # {cross-atten: 1x1x1024; vector: 14x768; concat: 1x4x72x128}
+                    uc[k] = repeat(uc[k], "b ... -> b t ...", t=num_frames) # {cross-atten: 1x14x1x1024; concat: 1x14x4x72x128}
+                    uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=num_frames) # {cross-atten: 14x1x1024; concat: 14x4x72x128}
                     c[k] = repeat(c[k], "b ... -> b t ...", t=num_frames)
                     c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=num_frames)
 
-                randn = torch.randn(shape, device=device)
+                randn = torch.randn(shape, device=device) # 14x4x72x128
 
                 additional_model_inputs = {}
                 additional_model_inputs["image_only_indicator"] = torch.zeros(
                     2, num_frames
-                ).to(device)
-                additional_model_inputs["num_video_frames"] = batch["num_video_frames"]
+                ).to(device) # 2x14
+                additional_model_inputs["num_video_frames"] = batch["num_video_frames"] # 14
 
                 def denoiser(input, sigma, c):
                     return model.denoiser(
                         model.model, input, sigma, c, **additional_model_inputs
-                    )
-
-                samples_z = model.sampler(denoiser, randn, cond=c, uc=uc)
-                model.en_and_decode_n_samples_a_time = decoding_t
-                samples_x = model.decode_first_stage(samples_z)
+                    ) # sgm.modules.diffusionmodules.denoiser.Denoiser => sgm.modules.diffusionmodules.denoiser_scaling.VScalingWithEDMcNoise
+                # model.model: sgm.modules.diffusionmodules.video_model.VideoUNet sgm/modules/diffusionmodules/video_model.py
+                samples_z = model.sampler(denoiser, randn, cond=c, uc=uc) #  sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+                model.en_and_decode_n_samples_a_time = decoding_t # 4
+                samples_x = model.decode_first_stage(samples_z) # decoder sgm.models.autoencoder.AutoencodingEngine
                 samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
 
                 os.makedirs(output_folder, exist_ok=True)

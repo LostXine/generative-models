@@ -172,15 +172,15 @@ class GeneralConditioner(nn.Module):
     ):
         if force_uc_zero_embeddings is None:
             force_uc_zero_embeddings = []
-        ucg_rates = list()
+        ucg_rates = list() # what does this ucg_rates do??? [0.0] * 5
         for embedder in self.embedders:
-            ucg_rates.append(embedder.ucg_rate)
+            ucg_rates.append(embedder.ucg_rate) # temporarily save the rates
             embedder.ucg_rate = 0.0
-        c = self(batch_c, force_cond_zero_embeddings)
-        uc = self(batch_c if batch_uc is None else batch_uc, force_uc_zero_embeddings)
+        c = self(batch_c, force_cond_zero_embeddings) # encode all conditions to embs
+        uc = self(batch_c if batch_uc is None else batch_uc, force_uc_zero_embeddings) # {cross-atten: 1x1x1024; vector: 14x768; concat: 1x4x72x128}
 
         for embedder, rate in zip(self.embedders, ucg_rates):
-            embedder.ucg_rate = rate
+            embedder.ucg_rate = rate # recover the rates
         return c, uc
 
 

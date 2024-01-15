@@ -28,11 +28,11 @@ class Denoiser(nn.Module):
         cond: Dict,
         **additional_model_inputs,
     ) -> torch.Tensor:
-        sigma = self.possibly_quantize_sigma(sigma)
+        sigma = self.possibly_quantize_sigma(sigma) # return sigma (input randn)
         sigma_shape = sigma.shape
-        sigma = append_dims(sigma, input.ndim)
-        c_skip, c_out, c_in, c_noise = self.scaling(sigma)
-        c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape))
+        sigma = append_dims(sigma, input.ndim) # match the dim 28->28x1x1x1
+        c_skip, c_out, c_in, c_noise = self.scaling(sigma) # different schedulers??? 28x1x1x1
+        c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape)) # return c_noise XS
         return (
             network(input * c_in, c_noise, cond, **additional_model_inputs) * c_out
             + input * c_skip
