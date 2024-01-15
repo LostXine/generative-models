@@ -59,7 +59,7 @@ class DeepFloydDataFiltering(object):
         imgs = clip_process_images(images)
         if self._device is None:
             self._device = next(p for p in self.clip_model.parameters()).device
-        image_features = self.clip_model.encode_image(imgs.to(self._device))
+        image_features = self.clip_model.encode_image(imgs.to(self._device)).float() # xl: convert back to float32
         image_features = image_features.detach().cpu().numpy().astype(np.float16)
         p_pred = predict_proba(image_features, self.cpu_p_weights, self.cpu_p_biases)
         w_pred = predict_proba(image_features, self.cpu_w_weights, self.cpu_w_biases)

@@ -28,7 +28,7 @@ def sample(
     motion_bucket_id: int = 127,
     cond_aug: float = 0.02,
     seed: int = 23,
-    decoding_t: int = 4,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
+    decoding_t: int = 1,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
     device: str = "cuda",
     output_folder: Optional[str] = None,
 ):
@@ -108,7 +108,7 @@ def sample(
             image = ToTensor()(image)
             image = image * 2.0 - 1.0
 
-        image = image.unsqueeze(0).to(device) # 1 x C x H x W
+        image = image.unsqueeze(0).to(device, dtype=torch.bfloat16) # 1 x C x H x W
         H, W = image.shape[2:]
         assert image.shape[1] == 3
         F = 8 # downsample factor
@@ -142,7 +142,7 @@ def sample(
         with torch.no_grad():
             with torch.autocast(device, dtype=torch.bfloat16):
             # the following opts are not implemented in bf16:
-            # 1. upsample_bicubic2d_out_frame
+            # 1. upsample_bicubic2d_out_frame -> requires torch 2.1; tested with torch 2.1.2
             # with torch.autocast(device):
                 batch, batch_uc = get_batch(
                     get_unique_embedder_keys_from_conditioner(model.conditioner), # check what conditions do the model need
@@ -168,12 +168,12 @@ def sample(
                     c[k] = repeat(c[k], "b ... -> b t ...", t=num_frames)
                     c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=num_frames)
 
-                randn = torch.randn(shape, device=device) # 14x4x72x128
+                randn = torch.randn(shape, device=device, dtype=torch.bfloat16) # 14x4x72x128
 
                 additional_model_inputs = {}
                 additional_model_inputs["image_only_indicator"] = torch.zeros(
                     2, num_frames
-                ).to(device) # 2x14
+                ).to(device, dtype=torch.bfloat16) # 2x14
                 additional_model_inputs["num_video_frames"] = batch["num_video_frames"] # 14
 
                 def denoiser(input, sigma, c):
@@ -182,8 +182,9 @@ def sample(
                     ) # sgm.modules.diffusionmodules.denoiser.Denoiser => sgm.modules.diffusionmodules.denoiser_scaling.VScalingWithEDMcNoise
                 # model.model: sgm.modules.diffusionmodules.video_model.VideoUNet sgm/modules/diffusionmodules/video_model.py
                 samples_z = model.sampler(denoiser, randn, cond=c, uc=uc) #  sgm.modules.diffusionmodules.sampling.EulerEDMSampler
-                model.en_and_decode_n_samples_a_time = decoding_t # 4
-                samples_x = model.decode_first_stage(samples_z) # decoder sgm.models.autoencoder.AutoencodingEngine
+                # samples_z is float32 due to the denoiser scaling VScalingWithEDMcNoise (sure about this) and the denoiser(?NOT sure about this)
+                model.en_and_decode_n_samples_a_time = decoding_t
+                samples_x = model.decode_first_stage(samples_z.to(dtype=torch.bfloat16)) # decoder sgm.models.autoencoder.AutoencodingEngine
                 samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
 
                 os.makedirs(output_folder, exist_ok=True)
@@ -196,8 +197,8 @@ def sample(
                     (samples.shape[-1], samples.shape[-2]),
                 )
 
-                samples = embed_watermark(samples)
-                samples = filter(samples)
+                # samples = embed_watermark(samples)
+                samples = filter(samples).float() # xl: convert back to float32 for numpy
                 vid = (
                     (rearrange(samples, "t c h w -> t h w c") * 255)
                     .cpu()
@@ -273,7 +274,7 @@ def load_model(
     )
     if device == "cuda":
         with torch.device(device):
-            model = instantiate_from_config(config.model).to(device).eval()
+            model = instantiate_from_config(config.model).eval().to(device, dtype=torch.bfloat16)
     else:
         model = instantiate_from_config(config.model).to(device).eval()
 
