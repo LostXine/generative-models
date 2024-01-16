@@ -161,6 +161,7 @@ class GeneralConditioner(nn.Module):
                     )
                 else:
                     output[out_key] = emb
+            print(embedder.input_key, out_key, emb.shape)
         return output
 
     def get_unconditional_conditioning(

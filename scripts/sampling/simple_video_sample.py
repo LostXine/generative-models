@@ -161,12 +161,25 @@ def sample(
                         "cond_frames_without_noise",
                     ],
                 )
+                
+                # the order aligns with svd.yaml
+                # 0. crossattn cond_frames_without_noise  torch.Size([1, 1, 1024])
+                # 1. vector fps_id  torch.Size([14, 256])
+                # 2. vector motion_bucket_id  torch.Size([14, 256])
+                # 3. concat cond_frames  torch.Size([1, 4, 72, 128])
+                # 4. vector cond_aug  torch.Size([14, 256])
 
                 for k in ["crossattn", "concat"]: # {cross-atten: 1x1x1024; vector: 14x768; concat: 1x4x72x128}
                     uc[k] = repeat(uc[k], "b ... -> b t ...", t=num_frames) # {cross-atten: 1x14x1x1024; concat: 1x14x4x72x128}
                     uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=num_frames) # {cross-atten: 14x1x1024; concat: 14x4x72x128}
                     c[k] = repeat(c[k], "b ... -> b t ...", t=num_frames)
                     c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=num_frames)
+
+                # sizes: {
+                # cross-atten: 14x1x1024 <= cond_frames_without_noise
+                # concat: 14x4x72x128 <= cond_frames
+                # vector: 14x768 <= fps_id, motion_bucket_id, cond_aug
+                # }
 
                 randn = torch.randn(shape, device=device, dtype=torch.bfloat16) # 14x4x72x128
 
@@ -175,7 +188,6 @@ def sample(
                     2, num_frames
                 ).to(device, dtype=torch.bfloat16) # 2x14
                 additional_model_inputs["num_video_frames"] = batch["num_video_frames"] # 14
-
                 def denoiser(input, sigma, c):
                     return model.denoiser(
                         model.model, input, sigma, c, **additional_model_inputs
